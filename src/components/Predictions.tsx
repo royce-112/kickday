@@ -3,7 +3,8 @@ import React, { useState, useEffect, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Download, MapPin, TrendingUp, Activity } from "lucide-react";
+import { Download, MapPin, TrendingUp, Activity, Zap, Lock } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -19,6 +20,9 @@ import { Line } from "react-chartjs-2";
 import WaterBackground from "@/components/WaterBackground";
 import axios from "axios";
 import { Toaster } from "sonner";
+import { useDataset } from "@/context/DataContext";
+import PricingPlans from "@/components/PricingPlans";
+import TokenPurchaseModal from "@/components/TokenPurchase";
 import "leaflet/dist/leaflet.css";
 
 // Add Leaflet CSS fix - only inject once
@@ -69,6 +73,10 @@ const Predictions = () => {
   const [selectedSample, setSelectedSample] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
+  const [tokenPurchaseSuccess, setTokenPurchaseSuccess] = useState(false);
+
+  const { tokens, addTokens } = useDataset();
 
   const mapRef = useRef<HTMLDivElement>(null);
   const leafletMapRef = useRef<any>(null);
@@ -371,7 +379,7 @@ const Predictions = () => {
         yAxisID: "y",
       },
       {
-        label: "% Samples >100",
+        label: "% Samples &gt;100",
         data: percentHighRisk,
         borderColor: "#f59e0b",
         tension: 0.4,
@@ -429,7 +437,7 @@ const Predictions = () => {
 
         <Card className="p-6">
           <Tabs value={activeTab} onValueChange={setActiveTab}>
-            <TabsList className="mb-6 flex gap-2">
+            <TabsList className="mb-6 flex gap-2 flex-wrap">
               <TabsTrigger value="timeline">
                 <TrendingUp className="w-4 h-4 mr-1"/>Timeline
               </TabsTrigger>
@@ -438,6 +446,9 @@ const Predictions = () => {
               </TabsTrigger>
               <TabsTrigger value="map">
                 <MapPin className="w-4 h-4 mr-1"/>Map
+              </TabsTrigger>
+              <TabsTrigger value="pricing" className="gap-1">
+                <Zap className="w-4 h-4"/>Pricing
               </TabsTrigger>
             </TabsList>
 
@@ -563,6 +574,98 @@ const Predictions = () => {
                 </div>
               )}
             </TabsContent>
+
+            <TabsContent value="pricing">
+              <div className="space-y-6">
+                {/* Token Balance Card */}
+                <Card className="bg-gradient-to-r from-blue-50 to-blue-100 border-blue-300 p-6">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-sm text-blue-700 mb-1">Your Token Balance</p>
+                      <p className="text-4xl font-bold text-blue-900">{tokens}</p>
+                      <p className="text-xs text-blue-600 mt-1">Tokens available for processing</p>
+                    </div>
+                    <Zap className="w-16 h-16 text-blue-500 opacity-30" />
+                  </div>
+                </Card>
+
+                {/* Token Usage Info */}
+                <Alert className="bg-purple-50 border-purple-200">
+                  <AlertDescription className="text-purple-800">
+                    <strong>Free Features:</strong> Datasets with ≤ 50 rows • Full HMPI calculation & export
+                  </AlertDescription>
+                </Alert>
+
+                {tokens === 0 && (
+                  <Alert className="bg-yellow-50 border-yellow-200">
+                    <AlertDescription className="text-yellow-800 flex items-center gap-2">
+                      <Lock className="w-4 h-4" />
+                      <div>
+                        <strong>No tokens?</strong> Want to process large datasets (&gt;50 rows) or run predictions? 
+                        Get tokens below!
+                      </div>
+                    </AlertDescription>
+                  </Alert>
+                )}
+
+                {/* Pricing Plans Component */}
+                <PricingPlans 
+                  onSelectPlan={() => setIsTokenModalOpen(true)}
+                  currentTokens={tokens}
+                />
+
+                {/* Purchase Button */}
+                <div className="flex gap-3 mt-6">
+                  <Button
+                    onClick={() => setIsTokenModalOpen(true)}
+                    className="flex-1 bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 gap-2"
+                  >
+                    <Zap className="w-4 h-4" />
+                    Buy Tokens Now
+                  </Button>
+                </div>
+
+                {/* Token Usage Guide */}
+                <Card className="p-6 bg-gray-50">
+                  <h4 className="font-bold mb-4">Token Usage Guide</h4>
+                  <div className="space-y-3 text-sm">
+                    <div className="flex gap-3">
+                      <div className="flex-shrink-0">
+                        <div className="flex items-center justify-center h-8 w-8 rounded-md bg-blue-100 text-blue-600 font-bold">
+                          1
+                        </div>
+                      </div>
+                      <div>
+                        <p className="font-semibold">Large Dataset Processing</p>
+                        <p className="text-gray-600">1 token per dataset with &gt;50 rows</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-3">
+                      <div className="flex-shrink-0">
+                        <div className="flex items-center justify-center h-8 w-8 rounded-md bg-green-100 text-green-600 font-bold">
+                          3
+                        </div>
+                      </div>
+                      <div>
+                        <p className="font-semibold">Prediction Analysis</p>
+                        <p className="text-gray-600">3 tokens for full prediction analytics & forecasting</p>
+                      </div>
+                    </div>
+                    <div className="flex gap-3">
+                      <div className="flex-shrink-0">
+                        <div className="flex items-center justify-center h-8 w-8 rounded-md bg-purple-100 text-purple-600 font-bold">
+                          ✓
+                        </div>
+                      </div>
+                      <div>
+                        <p className="font-semibold">Always Free</p>
+                        <p className="text-gray-600">Small datasets (≤50 rows) with complete analysis & export</p>
+                      </div>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+            </TabsContent>
           </Tabs>
         </Card>
 
@@ -584,6 +687,24 @@ const Predictions = () => {
           </Button>
         </Card>
       </div>
+
+      <TokenPurchaseModal
+        isOpen={isTokenModalOpen}
+        onClose={() => setIsTokenModalOpen(false)}
+        currentTokens={tokens}
+        onPurchaseSimulate={(amount) => {
+          addTokens(amount);
+          setTokenPurchaseSuccess(true);
+          setTimeout(() => setTokenPurchaseSuccess(false), 3000);
+        }}
+      />
+
+      {tokenPurchaseSuccess && (
+        <div className="fixed bottom-4 right-4 bg-green-500 text-white p-4 rounded-lg shadow-lg flex items-center gap-2 z-50">
+          <Zap className="w-4 h-4" />
+          <span>Tokens added successfully! Your new balance: {tokens}</span>
+        </div>
+      )}
 
       <Toaster />
     </div>
