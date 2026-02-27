@@ -1,9 +1,12 @@
+<<<<<<< HEAD
+=======
 from flask import Flask, json, request, jsonify, send_file,Response
 from flask_cors import CORS
 import pandas as pd
 import numpy as np
 import io
 import os
+import math
 from datetime import datetime
 from pymongo import MongoClient
 import uuid
@@ -30,6 +33,238 @@ CORS(app)
 client = MongoClient("mongodb://localhost:27017/")
 db = client['heavy_metal_db']
 samples_collection = db['samples']
+
+# ========== TOKEN CALCULATION FUNCTION ==========
+def calculate_tokens(rows):
+    """Calculate tokens required based on number of rows in dataset
+    Formula:
+    - If rows <= 50: 0 tokens (free tier)
+    - Otherwise: k = ceil((rows - 50) / 5), tokens = ceil(2.5 * k)
+    """
+    if rows <= 50:
+        return 0
+    k = math.ceil((rows - 50) / 5)
+    tokens = math.ceil(2.5 * k)
+    return tokens
+
+# ========== TOKEN SYSTEM ENDPOINTS ==========
+
+@app.route("/token/check-status", methods=["POST"])
+def check_token_status():
+    """Check if user has enough tokens for an operation"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens_needed = data.get("tokens_needed", 0)
+        
+        # Get user tokens (for demo, return mock data)
+        user_tokens = db.users.find_one({"_id": user_id}) or {"tokens": 0}
+        
+        current_tokens = user_tokens.get("tokens", 0)
+        has_sufficient_tokens = current_tokens >= tokens_needed
+        
+        return jsonify({
+            "user_id": user_id,
+            "current_tokens": current_tokens,
+            "tokens_needed": tokens_needed,
+            "sufficient_tokens": has_sufficient_tokens,
+            "tokens_short": max(0, tokens_needed - current_tokens)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/add", methods=["POST"])
+def add_tokens():
+    """Add tokens to a user account (for demo/testing)"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens_to_add = data.get("tokens", 0)
+        
+        # Update user tokens in MongoDB
+        result = db.users.update_one(
+            {"_id": user_id},
+            {"$inc": {"tokens": tokens_to_add}, "$set": {"last_updated": datetime.utcnow()}},
+            upsert=True
+        )
+        
+        user = db.users.find_one({"_id": user_id})
+        
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "tokens_added": tokens_to_add,
+            "new_balance": user.get("tokens", 0),
+            "message": f"Added {tokens_to_add} tokens"
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/deduct", methods=["POST"])
+def deduct_tokens():
+    """Deduct tokens from a user account"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens_to_deduct = data.get("tokens", 0)
+        
+        user = db.users.find_one({"_id": user_id})
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        current_tokens = user.get("tokens", 0)
+        if current_tokens < tokens_to_deduct:
+            return jsonify({
+                "error": "Insufficient tokens",
+                "current_tokens": current_tokens,
+                "tokens_needed": tokens_to_deduct
+            }), 400
+        
+        result = db.users.update_one(
+            {"_id": user_id},
+            {"$inc": {"tokens": -tokens_to_deduct}, "$set": {"last_updated": datetime.utcnow()}}
+        )
+        
+        updated_user = db.users.find_one({"_id": user_id})
+        
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "tokens_deducted": tokens_to_deduct,
+            "new_balance": updated_user.get("tokens", 0)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/sync", methods=["POST"])
+def sync_tokens():
+    """Sync tokens from frontend localStorage to MongoDB"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens = data.get("tokens", 0)
+        
+        # Update or create user with token balance
+        result = db.users.update_one(
+            {"_id": user_id},
+            {"$set": {"tokens": tokens, "last_updated": datetime.utcnow()}},
+            upsert=True
+        )
+        
+        user = db.users.find_one({"_id": user_id})
+        
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "synced_tokens": tokens,
+            "balance": user.get("tokens", 0)
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/get-balance", methods=["GET"])
+def get_token_balance():
+    """Get current token balance for a user"""
+    try:
+        user_id = request.args.get("user_id", "anonymous")
+        
+        user = db.users.find_one({"_id": user_id})
+        if user:
+            return jsonify({
+                "user_id": user_id,
+                "balance": user.get("tokens", 0),
+                "email": user.get("email", "")
+            })
+        else:
+            return jsonify({
+                "user_id": user_id,
+                "balance": 0,
+                "email": ""
+            })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+# ========== TOKEN PRICING INFO ==========
+
+@app.route("/token/pricing", methods=["GET"])
+def get_pricing_info():
+    """Get pricing information for tokens"""
+    pricing_plans = [
+        {
+            "name": "Starter",
+            "tokens": 50,
+            "price": 499,
+            "currency": "INR",
+            "cost_per_token": 9.98,
+            "description": "Good for small datasets"
+        },
+        {
+            "name": "Research",
+            "tokens": 150,
+            "price": 1299,
+            "currency": "INR",
+            "cost_per_token": 8.66,
+            "highlighted": True,
+            "description": "Most popular - Best value"
+        },
+        {
+            "name": "Institutional",
+            "tokens": 500,
+            "price": 3999,
+            "currency": "INR",
+            "cost_per_token": 7.99,
+            "description": "For large-scale projects"
+        }
+    ]
+    
+    # Token requirement examples - using actual formula
+    token_usage_examples = {
+        "small_dataset": {
+            "rows": 50,
+            "tokens": calculate_tokens(50),
+            "description": "≤50 rows (Free tier)"
+        },
+        "medium_dataset": {
+            "rows": 100,
+            "tokens": calculate_tokens(100),
+            "description": "100 rows | k=10, tokens=⌈2.5×10⌉=25"
+        },
+        "large_dataset": {
+            "rows": 200,
+            "tokens": calculate_tokens(200),
+            "description": "200 rows | k=30, tokens=⌈2.5×30⌉=75"
+        },
+        "very_large_dataset": {
+            "rows": 500,
+            "tokens": calculate_tokens(500),
+            "description": "500 rows | k=90, tokens=⌈2.5×90⌉=225"
+        },
+        "enterprise_dataset": {
+            "rows": 1000,
+            "tokens": calculate_tokens(1000),
+            "description": "1000 rows | k=190, tokens=⌈2.5×190⌉=475"
+        }
+    }
+    
+    return jsonify({
+        "plans": pricing_plans,
+        "token_formula": {
+            "description": "Token cost based on dataset size",
+            "formula": "if rows ≤ 50: tokens = 0 (free), else: k = ⌈(rows - 50) / 5⌉, tokens = ⌈2.5 × k⌉",
+            "free_tier": "Datasets with ≤50 rows process for free"
+        },
+        "usage_examples": token_usage_examples,
+        "free_tier": {
+            "max_rows": 50,
+            "features": ["Full HMPI analysis", "Export to CSV/PDF", "Visualizations", "Complete metal concentration data"]
+        }
+    })
 
 METAL_KEYWORDS = {
     'Mercury': ['hg', 'mercury', 'hg_conc', 'mercury_conc', 'merc'],
@@ -438,7 +673,7 @@ def get_charts(file_id):
                 lambda g: g["coordinates"][1] if isinstance(g, dict) else None
             )
             if not coords.empty:
-                heatmap_fig = px.density_mapbox(
+                heatmap_fig = px.density_map(
                     coords,
                     lat="Latitude",
                     lon="Longitude",
@@ -446,7 +681,7 @@ def get_charts(file_id):
                     radius=30,
                     center=dict(lat=coords["Latitude"].mean(), lon=coords["Longitude"].mean()),
                     zoom=8,
-                    mapbox_style="stamen-terrain",
+                    map_style="stamen-terrain",
                 )
                 heatmap_fig.update_layout(
     paper_bgcolor="rgba(0,0,0,0)",
@@ -490,9 +725,36 @@ def process_file():
         return jsonify({"error": "No file uploaded"}), 400
 
     file = request.files["file"]
+    user_id = request.form.get("user_id", "anonymous")
+    
     try:
         # Load file
         df = load_file(file)
+        
+        # Calculate tokens required based on row count
+        row_count = len(df)
+        tokens_required = calculate_tokens(row_count)
+        
+        # If tokens required, check user balance
+        if tokens_required > 0:
+            user = db.users.find_one({"_id": user_id})
+            current_tokens = user.get("tokens", 0) if user else 0
+            
+            if current_tokens < tokens_required:
+                return jsonify({
+                    "error": "Insufficient tokens",
+                    "current_tokens": current_tokens,
+                    "tokens_required": tokens_required,
+                    "row_count": row_count,
+                    "message": f"This dataset has {row_count} rows and requires {tokens_required} token(s) to process. You currently have {current_tokens} token(s). Please purchase more tokens."
+                }), 403
+            
+            # Deduct tokens from user account
+            db.users.update_one(
+                {"_id": user_id},
+                {"$inc": {"tokens": -tokens_required}, "$set": {"last_updated": datetime.utcnow()}},
+                upsert=False
+            )
 
         # Run pipeline
         df_clean, merged_cols = preprocess_dataframe(df)
@@ -525,10 +787,23 @@ def process_file():
         samples_collection.insert_one({
             "_id": doc_id,
             "GeoJSON": features,
-            "created_at": datetime.utcnow()
+            "created_at": datetime.utcnow(),
+            "user_id": user_id,
+            "row_count": row_count,
+            "tokens_used": tokens_required
         })
 
-        return jsonify({"file_id": doc_id, "GeoJSON": features})
+        # Get updated token balance
+        updated_user = db.users.find_one({"_id": user_id})
+        new_balance = updated_user.get("tokens", 0) if updated_user else 0
+
+        return jsonify({
+            "file_id": doc_id, 
+            "GeoJSON": features,
+            "row_count": row_count,
+            "tokens_used": tokens_required,
+            "new_token_balance": new_balance
+        })
 
     except Exception as e:
         import traceback
@@ -1143,3 +1418,4 @@ def download_predictions_csv():
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
+>>>>>>> 8386802 (i love nandani)

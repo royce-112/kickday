@@ -91,28 +91,23 @@ const Samples = () => {
         </button>
       </div>
 
-      <div className="flex-shrink-0 border border-border rounded-t-lg overflow-x-auto"
-        style={{
-          background: 'linear-gradient(90deg, rgba(5,78,107,1) 0%, rgba(32,119,186,1) 51%, rgba(83,157,237,1) 100%)'
-        }}>
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-border">
+      <div className="flex-1 border border-border rounded-lg overflow-auto bg-card">
+        <table className="w-full border-collapse">
+          <thead className="sticky top-0 z-10"
+            style={{
+              background: 'linear-gradient(90deg, rgba(5,78,107,1) 0%, rgba(32,119,186,1) 51%, rgba(83,157,237,1) 100%)'
+            }}>
+            <tr className="border-b border-border text-white">
               <th className="w-12 px-2 py-3"></th>
-              <th className="px-4 py-3">Sample ID</th>
-              <th className="px-4 py-3">Latitude</th>
-              <th className="px-4 py-3">Longitude</th>
-              <th className="px-4 py-3">HMPI</th>
+              <th className="px-4 py-3 text-left font-semibold">Sample ID</th>
+              <th className="px-4 py-3 text-left font-semibold">Latitude</th>
+              <th className="px-4 py-3 text-left font-semibold">Longitude</th>
+              <th className="px-4 py-3 text-left font-semibold">HMPI</th>
               {metals.map((m) => (
-                <th key={m} className="px-4 py-3">{m} mg/L</th>
+                <th key={m} className="px-4 py-3 text-left font-semibold">{m} mg/L</th>
               ))}
             </tr>
           </thead>
-        </table>
-      </div>
-
-      <div className="flex-1 border-x border-b border-border rounded-b-lg overflow-auto bg-card max-h-[70vh]">
-        <table className="w-full">
           <tbody>
             {data.map((row, index) => {
               const { lat, lng } = getLatLng(row.geometry);
