@@ -76,7 +76,11 @@ const TokenPurchaseModal: React.FC<TokenPurchaseModalProps> = ({
         )}
 
         {purchaseStep === 'select' ? (
-          <PricingPlans onSelectPlan={handlePlanSelect} currentTokens={currentTokens} />
+          <PricingPlans 
+            onSelectPlan={handlePlanSelect} 
+            currentTokens={currentTokens}
+            requiredTokens={requiredTokens}
+          />
         ) : (
           <div className="space-y-4">
             <Alert className="bg-blue-50 border-blue-200">

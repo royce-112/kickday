@@ -12,14 +12,24 @@ import TokenPurchaseModal from '@/components/TokenPurchase';
 const DatasetUpload = () => {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [isLargeDataset, setIsLargeDataset] = useState(false);
   const [datasetRowCount, setDatasetRowCount] = useState(0);
+  const [tokensRequired, setTokensRequired] = useState(0);
   const [isTokenModalOpen, setIsTokenModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const { toast } = useToast();
   const { setData, setFileId, tokens, addTokens, deductTokens, user } = useDataset();
   const navigate = useNavigate();
+
+  // Token calculation function matching backend formula
+  const calculateTokens = (rows: number): number => {
+    if (rows <= 50) {
+      return 0;
+    }
+    const k = Math.ceil((rows - 50) / 5);
+    const tokensNeeded = Math.ceil(2.5 * k);
+    return tokensNeeded;
+  };
 
   const openFileDialog = () => fileInputRef.current?.click();
 
@@ -62,22 +72,29 @@ const DatasetUpload = () => {
       const rowCount = await checkFileRowCount(file);
       setDatasetRowCount(rowCount);
       
-      if (rowCount > 50) {
-        setIsLargeDataset(true);
-        // Large dataset requires tokens
-        if (tokens < 1) {
-          // Show clear message about token requirement
-          toast({ 
-            title: "Tokens Required", 
-            description: `This dataset has ${rowCount} rows. Datasets with >50 rows need 1 token to process.`,
-            variant: "destructive"
-          });
-          setIsTokenModalOpen(true);
-          return;
-        }
+      // Calculate tokens needed using the formula
+      const tokensNeeded = calculateTokens(rowCount);
+      setTokensRequired(tokensNeeded);
+      
+      // Check if user has enough tokens
+      if (tokensNeeded > 0 && tokens < tokensNeeded) {
+        toast({ 
+          title: "Tokens Required", 
+          description: `Dataset with ${rowCount} rows requires ${tokensNeeded} token(s). You have ${tokens} token(s).`,
+          variant: "destructive"
+        });
+        setIsTokenModalOpen(true);
+        return; // Don't process yet, wait for token purchase
+      } else if (tokensNeeded > 0) {
+        toast({ 
+          title: "Tokens Available", 
+          description: `Dataset will require ${tokensNeeded} token(s) to process.`
+        });
       } else {
-        // Small dataset - process immediately
-        setIsLargeDataset(false);
+        toast({ 
+          title: "Free Tier", 
+          description: "Dataset with ≤50 rows processes for free!"
+        });
       }
     }
 
@@ -115,7 +132,10 @@ const DatasetUpload = () => {
       }
 
       // Store both data and fileId
-      setData(response.data.GeoJSON);
+      // Extract features array if GeoJSON is a FeatureCollection object
+      const geoData = response.data.GeoJSON;
+      const featuresArray = geoData.features ? geoData.features : geoData;
+      setData(featuresArray);
       setFileId(response.data.file_id);
 
       toast({ 
@@ -126,7 +146,7 @@ const DatasetUpload = () => {
       // Navigate automatically to analysis
       setTimeout(() => {
         navigate('/analysis/samples');
-      }, 1500);
+      }, 1000);
       
     } catch (error: any) {
       console.error('Upload error:', error.response?.data || error.message);
@@ -163,10 +183,10 @@ const DatasetUpload = () => {
           <p className="text-muted-foreground">Upload heavy metal data with geo-coordinates for HMPI analysis</p>
         </div>
 
-        {!uploadedFile || isLargeDataset ? (
+        {!uploadedFile || tokensRequired > tokens ? (
           <div
             className="relative border-2 border-water-primary bg-water-primary/20 rounded-lg p-8 text-center cursor-pointer"
-            onClick={!isLargeDataset || tokens > 0 ? openFileDialog : undefined}
+            onClick={tokensRequired <= tokens ? openFileDialog : undefined}
           >
             <input
               ref={fileInputRef}
@@ -227,36 +247,37 @@ const DatasetUpload = () => {
           </div>
         )}
 
-        {/* Large Dataset Warning - No Tokens */}
-        {isLargeDataset && tokens === 0 && (
+        {/* Token Requirement Alert - When Insufficient Tokens */}
+        {tokensRequired > 0 && tokensRequired > tokens && datasetRowCount > 0 && (
           <Alert className="mt-6 border-orange-300 bg-orange-50/80">
             <Zap className="h-5 w-5 text-orange-600" />
             <AlertDescription className="text-orange-800 ml-2">
               <strong className="block mb-2">🔒 Tokens Required to Process This Dataset</strong>
-              <p className="mb-3">Your dataset contains <strong>{datasetRowCount} rows</strong>. Datasets larger than 50 rows require tokens to process.</p>
+              <p className="mb-3">Your dataset contains <strong>{datasetRowCount} rows</strong> and requires <strong>{tokensRequired} token(s)</strong> to process.</p>
               <div className="bg-white/60 p-3 rounded mb-3 text-sm">
-                <p className="font-semibold mb-1">Current Status:</p>
-                <p>📊 Available Tokens: <strong className="text-red-600">0</strong></p>
-                <p>💾 Dataset Size: <strong>{datasetRowCount} rows</strong></p>
-                <p>💰 Tokens Needed: <strong>1 token</strong></p>
+                <p className="font-semibold mb-2">Token Calculation:</p>
+                <p>📊 Dataset Size: <strong>{datasetRowCount} rows</strong></p>
+                <p>💾 Tokens Needed: <strong className="text-orange-600">{tokensRequired} token(s)</strong></p>
+                <p>⚡ Your Balance: <strong className={tokens >= tokensRequired ? 'text-green-600' : 'text-red-600'}>{tokens} token(s)</strong></p>
+                <p className="text-xs mt-2 opacity-75">Formula: k = ⌈(rows - 50) / 5⌉, tokens = ⌈2.5 × k⌉</p>
               </div>
               <Button
                 onClick={() => setIsTokenModalOpen(true)}
                 className="w-full gap-2 bg-orange-600 hover:bg-orange-700"
               >
                 <Zap className="w-4 h-4" />
-                Get Tokens Now
+                Get {tokensRequired - tokens} More Token{tokensRequired - tokens === 1 ? '' : 's'}
               </Button>
             </AlertDescription>
           </Alert>
         )}
 
         {/* Free Dataset Info */}
-        {datasetRowCount > 0 && datasetRowCount <= 50 && (
+        {tokensRequired === 0 && datasetRowCount > 0 && datasetRowCount <= 50 && (
           <Alert className="mt-6 border-green-300 bg-green-50/80">
             <CheckCircle className="h-4 w-4 text-green-600" />
             <AlertDescription className="text-green-800 ml-2">
-              <strong>Great!</strong> Your dataset with {datasetRowCount} rows qualifies for free processing and analysis.
+              <strong>✅ Free Tier Available!</strong> Your dataset with <strong>{datasetRowCount} rows</strong> qualifies for free processing and analysis. No tokens required!
             </AlertDescription>
           </Alert>
         )}
@@ -303,10 +324,22 @@ const DatasetUpload = () => {
         <TokenPurchaseModal
           isOpen={isTokenModalOpen}
           onClose={() => setIsTokenModalOpen(false)}
+          requiredTokens={tokensRequired}
           currentTokens={tokens}
           onPurchaseSimulate={(amount) => {
             addTokens(amount);
             setIsTokenModalOpen(false);
+            
+            // Auto-process the pending file after token purchase
+            if (uploadedFile && tokensRequired > 0) {
+              setTimeout(async () => {
+                toast({ 
+                  title: "Processing File", 
+                  description: "Your tokens have been added. Processing your dataset now..." 
+                });
+                await processFile(uploadedFile);
+              }, 500);
+            }
           }}
         />
       </CardContent>
