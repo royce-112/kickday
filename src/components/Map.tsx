@@ -399,20 +399,12 @@ const MapVisualization: React.FC = () => {
       markersRef.current.forEach(m => m.remove());
       map.remove();
     };
-<<<<<<< HEAD
-  }, []);
-=======
   }, [mapData]);
->>>>>>> 4a306af (sirf video ke liye)
 
   const handleRecenter = () => {
     if (!mapRef.current) return;
     const bounds = new maplibregl.LngLatBounds();
-<<<<<<< HEAD
-    allData.forEach(s => bounds.extend(s.geometry.coordinates));
-=======
     mapData.forEach(s => bounds.extend(s.geometry.coordinates));
->>>>>>> 4a306af (sirf video ke liye)
     mapRef.current.fitBounds(bounds, { padding: 50 });
     // Reset everything
     if (popupRef.current) {
