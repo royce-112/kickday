@@ -4,11 +4,13 @@ import pandas as pd
 import numpy as np
 import io
 import os
-from datetime import datetime
+import traceback
+from google.auth.transport import requests
 from pymongo import MongoClient
 import uuid
 import re
 import base64
+import math
 from bson import ObjectId
 from pdf_export import generate_sample_charts
 import plotly.graph_objects as go
@@ -24,12 +26,114 @@ import base64
 from io import BytesIO
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler
+from openpyxl import Workbook
+from dotenv import load_dotenv
+import os
+from pymongo import MongoClient
+from google.oauth2 import id_token
+import jwt
+from datetime import datetime, timedelta
+load_dotenv()
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+MONGO_URI = os.getenv("MONGO_URI")
 
 app = Flask(__name__)
 CORS(app)
-client = MongoClient("mongodb://localhost:27017/")
+client = MongoClient(MONGO_URI)
 db = client['heavy_metal_db']
 samples_collection = db['samples']
+
+def verify_jwt():
+    auth = request.headers.get("Authorization")
+
+    if not auth:
+        return None
+
+    try:
+        token = auth.split(" ")[1]
+        data = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        user = samples_collection.find_one({"email": data["email"]})
+        return user
+    except:
+        return None
+        
+@app.route("/google-login", methods=["POST"])
+def google_login():
+    try:
+        token = request.json["token"]
+        print("[LOG] Google Login Request Received")
+        print("[LOG] TOKEN RECEIVED (first 40 chars):", token[:40])
+
+        idinfo = id_token.verify_oauth2_token(
+            token,
+            requests.Request(),
+            GOOGLE_CLIENT_ID
+        )
+
+        print("[LOG] TOKEN VERIFIED SUCCESSFULLY")
+
+        email = idinfo["email"]
+        name = idinfo["name"]
+        picture = idinfo.get("picture", "")
+
+        print("[LOG] User Info - Email:", email, "Name:", name)
+
+        # Check if user exists
+        user = samples_collection.find_one({"email": email})
+
+        if user:
+            print("[LOG] User already exists in DB")
+        else:
+            print("[LOG] New user - creating in DB")
+            result = samples_collection.insert_one({
+                "email": email,
+                "name": name,
+                "picture": picture,
+                "tokens": 0,
+            })
+            print("[LOG] User inserted with ID:", result.inserted_id)
+            user = samples_collection.find_one({"email": email})
+            print("[LOG] User retrieved after insert:", user)
+
+        jwt_token = jwt.encode({
+            "email": email,
+            "exp": datetime.utcnow() + timedelta(days=7)
+        }, JWT_SECRET, algorithm="HS256")
+
+        response_data = {
+            "token": jwt_token,
+            "user": {
+                "name": user["name"],
+                "email": user["email"],
+                "picture": user.get("picture", ""),
+                "tokens": user["tokens"]
+            }
+        }
+
+        print("[LOG] Returning response:", response_data)
+        return jsonify(response_data), 200
+
+    except Exception as e:
+        print("[ERROR] Google Login Failed:", str(e))
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 401
+    
+@app.route("/me", methods=["GET"])
+def get_current_user():
+    user = verify_jwt()
+
+    if not user:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    return jsonify({
+        "name": user["name"],
+        "email": user["email"],
+        "picture": user.get("picture", ""),
+        "tokens": user["tokens"]
+    })
 
 METAL_KEYWORDS = {
     'Mercury': ['hg', 'mercury', 'hg_conc', 'mercury_conc', 'merc'],
@@ -43,6 +147,238 @@ METAL_KEYWORDS = {
     'Iron': ['fe', 'iron', 'fe_conc'],
     'Manganese': ['mn', 'manganese', 'mn_conc']
     }
+# ========== TOKEN CALCULATION FUNCTION ==========
+def calculate_tokens(rows):
+    """Calculate tokens required based on number of rows in dataset
+    Formula:
+    - If rows <= 50: 0 tokens (free tier)
+    - Otherwise: k = ceil((rows - 50) / 5), tokens = ceil(2.5 * k)
+    """
+    if rows <= 50:
+        return 0
+    k = math.ceil((rows - 50) / 5)
+    tokens = math.ceil(2.5 * k)
+    return tokens
+
+# ========== TOKEN SYSTEM ENDPOINTS ==========
+
+@app.route("/token/check-status", methods=["POST"])
+def check_token_status():
+    """Check if user has enough tokens for an operation"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens_needed = data.get("tokens_needed", 0)
+        
+        # Get user tokens (for demo, return mock data)
+        user_tokens = db.users.find_one({"_id": user_id}) or {"tokens": 0}
+        
+        current_tokens = user_tokens.get("tokens", 0)
+        has_sufficient_tokens = current_tokens >= tokens_needed
+        
+        return jsonify({
+            "user_id": user_id,
+            "current_tokens": current_tokens,
+            "tokens_needed": tokens_needed,
+            "sufficient_tokens": has_sufficient_tokens,
+            "tokens_short": max(0, tokens_needed - current_tokens)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/add", methods=["POST"])
+def add_tokens():
+    """Add tokens to a user account (for demo/testing)"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens_to_add = data.get("tokens", 0)
+        
+        # Update user tokens in MongoDB
+        result = db.users.update_one(
+            {"_id": user_id},
+            {"$inc": {"tokens": tokens_to_add}, "$set": {"last_updated": datetime.utcnow()}},
+            upsert=True
+        )
+        
+        user = db.users.find_one({"_id": user_id})
+        
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "tokens_added": tokens_to_add,
+            "new_balance": user.get("tokens", 0),
+            "message": f"Added {tokens_to_add} tokens"
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/deduct", methods=["POST"])
+def deduct_tokens():
+    """Deduct tokens from a user account"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens_to_deduct = data.get("tokens", 0)
+        
+        user = db.users.find_one({"_id": user_id})
+        if not user:
+            return jsonify({"error": "User not found"}), 404
+        
+        current_tokens = user.get("tokens", 0)
+        if current_tokens < tokens_to_deduct:
+            return jsonify({
+                "error": "Insufficient tokens",
+                "current_tokens": current_tokens,
+                "tokens_needed": tokens_to_deduct
+            }), 400
+        
+        result = db.users.update_one(
+            {"_id": user_id},
+            {"$inc": {"tokens": -tokens_to_deduct}, "$set": {"last_updated": datetime.utcnow()}}
+        )
+        
+        updated_user = db.users.find_one({"_id": user_id})
+        
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "tokens_deducted": tokens_to_deduct,
+            "new_balance": updated_user.get("tokens", 0)
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/sync", methods=["POST"])
+def sync_tokens():
+    """Sync tokens from frontend localStorage to MongoDB"""
+    try:
+        data = request.json
+        user_id = data.get("user_id", "anonymous")
+        tokens = data.get("tokens", 0)
+        
+        # Update or create user with token balance
+        result = db.users.update_one(
+            {"_id": user_id},
+            {"$set": {"tokens": tokens, "last_updated": datetime.utcnow()}},
+            upsert=True
+        )
+        
+        user = db.users.find_one({"_id": user_id})
+        
+        return jsonify({
+            "success": True,
+            "user_id": user_id,
+            "synced_tokens": tokens,
+            "balance": user.get("tokens", 0)
+        })
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/token/get-balance", methods=["GET"])
+def get_token_balance():
+    """Get current token balance for a user"""
+    try:
+        user_id = request.args.get("user_id", "anonymous")
+        
+        user = db.users.find_one({"_id": user_id})
+        if user:
+            return jsonify({
+                "user_id": user_id,
+                "balance": user.get("tokens", 0),
+                "email": user.get("email", "")
+            })
+        else:
+            return jsonify({
+                "user_id": user_id,
+                "balance": 0,
+                "email": ""
+            })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+# ========== TOKEN PRICING INFO ==========
+
+@app.route("/token/pricing", methods=["GET"])
+def get_pricing_info():
+    """Get pricing information for tokens"""
+    pricing_plans = [
+        {
+            "name": "Starter",
+            "tokens": 50,
+            "price": 499,
+            "currency": "INR",
+            "cost_per_token": 9.98,
+            "description": "Good for small datasets"
+        },
+        {
+            "name": "Research",
+            "tokens": 150,
+            "price": 1299,
+            "currency": "INR",
+            "cost_per_token": 8.66,
+            "highlighted": True,
+            "description": "Most popular - Best value"
+        },
+        {
+            "name": "Institutional",
+            "tokens": 500,
+            "price": 3999,
+            "currency": "INR",
+            "cost_per_token": 7.99,
+            "description": "For large-scale projects"
+        }
+    ]
+    
+    # Token requirement examples - using actual formula
+    token_usage_examples = {
+        "small_dataset": {
+            "rows": 50,
+            "tokens": calculate_tokens(50),
+            "description": "≤50 rows (Free tier)"
+        },
+        "medium_dataset": {
+            "rows": 100,
+            "tokens": calculate_tokens(100),
+            "description": "100 rows | k=10, tokens=⌈2.5×10⌉=25"
+        },
+        "large_dataset": {
+            "rows": 200,
+            "tokens": calculate_tokens(200),
+            "description": "200 rows | k=30, tokens=⌈2.5×30⌉=75"
+        },
+        "very_large_dataset": {
+            "rows": 500,
+            "tokens": calculate_tokens(500),
+            "description": "500 rows | k=90, tokens=⌈2.5×90⌉=225"
+        },
+        "enterprise_dataset": {
+            "rows": 1000,
+            "tokens": calculate_tokens(1000),
+            "description": "1000 rows | k=190, tokens=⌈2.5×190⌉=475"
+        }
+    }
+    
+    return jsonify({
+        "plans": pricing_plans,
+        "token_formula": {
+            "description": "Token cost based on dataset size",
+            "formula": "if rows ≤ 50: tokens = 0 (free), else: k = ⌈(rows - 50) / 5⌉, tokens = ⌈2.5 × k⌉",
+            "free_tier": "Datasets with ≤50 rows process for free"
+        },
+        "usage_examples": token_usage_examples,
+        "free_tier": {
+            "max_rows": 50,
+            "features": ["Full HMPI analysis", "Export to CSV/PDF", "Visualizations", "Complete metal concentration data"]
+        }
+    })
+
 
 def allowed_file(filename):
     return filename.lower().endswith(('.csv','.xls','.xlsx'))
@@ -792,6 +1128,926 @@ def export_pdf(file_id):
         import traceback
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
+
+
+@app.route("/download_pdf_long/<file_id>", methods=["GET"])
+def download_pdf_long(file_id):
+    try:
+        doc = samples_collection.find_one({'_id': file_id})
+        if not doc:
+            return jsonify({'error': 'File not found'}), 404
+
+        geojson_data = doc.get('GeoJSON', [])
+        file_name = doc.get('file_name', f"file_{file_id}")
+        
+        if not geojson_data:
+            return jsonify({'error': 'No data found'}), 400
+
+        df = pd.DataFrame(geojson_data)
+
+        # Expand metal concentrations
+        if "all_metal_conc" in df.columns:
+            metals_expanded = pd.json_normalize(df["all_metal_conc"])
+            df = pd.concat([df.drop(columns=["all_metal_conc"]), metals_expanded], axis=1)
+
+        # Detect metals
+        metal_cols = {metal: metal for metal in df.columns if metal in STANDARD_LIMITS}
+        if not metal_cols:
+            return jsonify({'error': 'No heavy metal data found'}), 400
+
+        # Compute HMPI
+        df_hmpi = compute_hmpi_vectorized(df, metal_cols)
+
+        # Generate long report
+        pdf_buffer = generate_long_report_pdf(df_hmpi, file_id, file_name, metal_cols)
+        
+        # Ensure buffer is at position 0
+        pdf_buffer.seek(0)
+        
+        # Read buffer to get size for Content-Length header
+        pdf_data = pdf_buffer.read()
+        pdf_buffer = io.BytesIO(pdf_data)
+        pdf_buffer.seek(0)
+
+        return send_file(
+            pdf_buffer,
+            as_attachment=True,
+            download_name=f"HMPI_Long_Report.pdf",
+            mimetype="application/pdf",
+            
+        )
+
+    except Exception as e:
+        import traceback
+        print(f"Error in download_pdf_long: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/download_pdf_short/<file_id>", methods=["GET"])
+def download_pdf_short(file_id):
+    try:
+        doc = samples_collection.find_one({'_id': file_id})
+        if not doc:
+            return jsonify({'error': 'File not found'}), 404
+
+        geojson_data = doc.get('GeoJSON', [])
+        file_name = doc.get('file_name', f"file_{file_id}")
+        
+        if not geojson_data:
+            return jsonify({'error': 'No data found'}), 400
+
+        df = pd.DataFrame(geojson_data)
+
+        # Expand metal concentrations
+        if "all_metal_conc" in df.columns:
+            metals_expanded = pd.json_normalize(df["all_metal_conc"])
+            df = pd.concat([df.drop(columns=["all_metal_conc"]), metals_expanded], axis=1)
+
+        # Detect metals
+        metal_cols = {metal: metal for metal in df.columns if metal in STANDARD_LIMITS}
+        if not metal_cols:
+            return jsonify({'error': 'No heavy metal data found'}), 400
+
+        # Compute HMPI
+        df_hmpi = compute_hmpi_vectorized(df, metal_cols)
+
+        # Generate short report
+        pdf_buffer = generate_short_report_pdf(df_hmpi, file_id, file_name, metal_cols)
+        
+        # Ensure buffer is at position 0
+        pdf_buffer.seek(0)
+        
+        # Read buffer to get size for Content-Length header
+        pdf_data = pdf_buffer.read()
+        pdf_buffer = io.BytesIO(pdf_data)
+        pdf_buffer.seek(0)
+
+        return send_file(
+            pdf_buffer,
+            as_attachment=True,
+            download_name=f"HMPI_Short_Report.pdf",
+            mimetype="application/pdf",
+            
+        )
+
+    except Exception as e:
+        import traceback
+        print(f"Error in download_pdf_short: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route("/download_excel/<file_id>", methods=["GET"])
+def download_excel(file_id):
+    try:
+        doc = samples_collection.find_one({'_id': file_id})
+        if not doc:
+            return jsonify({'error': 'File not found'}), 404
+
+        geojson_data = doc.get('GeoJSON', [])
+        file_name = doc.get('file_name', f"file_{file_id}")
+        
+        if not geojson_data:
+            return jsonify({'error': 'No data found'}), 400
+
+        df = pd.DataFrame(geojson_data)
+
+        # Expand metal concentrations
+        if "all_metal_conc" in df.columns:
+            metals_expanded = pd.json_normalize(df["all_metal_conc"])
+            df = pd.concat([df.drop(columns=["all_metal_conc"]), metals_expanded], axis=1)
+
+        # Detect metals
+        metal_cols = {metal: metal for metal in df.columns if metal in STANDARD_LIMITS}
+        if not metal_cols:
+            return jsonify({'error': 'No heavy metal data found'}), 400
+
+        # Compute HMPI
+        df_hmpi = compute_hmpi_vectorized(df, metal_cols)
+
+        # Export to Excel with error checking
+        excel_buffer = export_to_excel(df_hmpi, file_name)
+        
+        # Ensure buffer is at position 0
+        excel_buffer.seek(0)
+        
+        # Read buffer to ensure it's properly written
+        excel_data = excel_buffer.read()
+        excel_buffer = io.BytesIO(excel_data)
+        excel_buffer.seek(0)
+
+        return send_file(
+            excel_buffer,
+            as_attachment=True,
+            download_name=f"HMPI_Data.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            
+        )
+
+    except Exception as e:
+        import traceback
+        print(f"Error in download_excel: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+def convert_plotly_to_png(fig, width=1000, height=500):
+    """
+    Convert Plotly figure to PNG bytes.
+    Returns None if conversion fails (kaleido not available).
+    """
+    try:
+        img_bytes = pio.to_image(fig, format='png', width=width, height=height)
+        return img_bytes
+    except Exception as e:
+        print(f"Warning: Could not convert Plotly figure to image: {e}")
+        return None
+
+
+def generate_long_report_pdf(df_hmpi: pd.DataFrame, file_id: str, file_name: str, metal_cols: dict) -> BytesIO:
+
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        title=f"HMPI Long Report - {file_id}",
+        leftMargin=0.5 * inch,
+        rightMargin=0.5 * inch,
+        topMargin=0.5 * inch,
+        bottomMargin=0.5 * inch
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    try:
+        df_hmpi_copy = df_hmpi.copy()
+
+        risk_bins = [0, 60, 100, np.inf]
+        risk_labels = ["Safe (≤60)", "Moderate (61–100)", "High (>100)"]
+
+        df_hmpi_copy["RiskCategory"] = pd.cut(
+            df_hmpi_copy["HMPI"],
+            bins=risk_bins,
+            labels=risk_labels
+        )
+
+        # ================= PAGE 1 =================
+        story.append(Paragraph("HMPI Comprehensive Analysis Report", styles['Title']))
+        story.append(Spacer(1, 0.15 * inch))
+        story.append(Paragraph(f"File: {file_name}", styles['Normal']))
+        story.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d')}", styles['Normal']))
+        story.append(Spacer(1, 0.2 * inch))
+
+        table_data = [['Sample ID', 'HMPI Value', 'Risk Category']]
+
+        for _, row in df_hmpi_copy.iterrows():
+            table_data.append([
+                str(row.get("Sample_ID", "N/A")),
+                f"{row['HMPI']:.4f}" if pd.notna(row["HMPI"]) else "N/A",
+                str(row.get("RiskCategory", "N/A"))
+            ])
+
+        summary_table = Table(table_data, colWidths=[1.5 * inch, 1.5 * inch, 2 * inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2E4053')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 8),
+            ('GRID', (0, 0), (-1, -1), 0.3, colors.black),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+             [colors.white, colors.HexColor('#F4F6F7')])
+        ]))
+
+        story.append(summary_table)
+
+        # ================= PAGE 2 =================
+        story.append(PageBreak())
+        story.append(Paragraph("Global Analysis - Visualizations", styles['Heading1']))
+        story.append(Spacer(1, 0.3 * inch))
+
+        hmpi_valid = df_hmpi_copy["HMPI"].dropna()
+
+        if len(hmpi_valid) > 0:
+            mean_val = hmpi_valid.mean()
+
+            hist_fig = px.histogram(
+                hmpi_valid,
+                nbins=20,
+                title="HMPI Distribution",
+                labels={'value': 'HMPI Value', 'count': 'Frequency'}
+            )
+
+            hist_fig.update_traces(marker_color="#4e73df")
+            hist_fig.add_vline(
+                x=mean_val,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"Mean = {mean_val:.2f}"
+            )
+
+            hist_fig.update_layout(height=500, width=900)
+
+            img_data = convert_plotly_to_png(hist_fig, 900, 500)
+            if img_data:
+                story.append(Image(BytesIO(img_data), width=6.5 * inch, height=3.8 * inch))
+
+        story.append(Spacer(1, 0.3 * inch))
+
+        # Risk Distribution Bar
+        risk_counts = df_hmpi_copy["RiskCategory"].value_counts().reindex(risk_labels, fill_value=0)
+
+        risk_df = pd.DataFrame({
+            "Risk Category": risk_counts.index,
+            "Count": risk_counts.values
+        })
+
+        bar_fig = px.bar(
+            risk_df,
+            x="Risk Category",
+            y="Count",
+            color="Risk Category",
+            title="Risk Category Distribution",
+            color_discrete_map={
+                "Safe (≤60)": "#2ecc71",
+                "Moderate (61–100)": "#f39c12",
+                "High (>100)": "#e74c3c"
+            }
+        )
+
+        bar_fig.update_layout(height=500, width=900)
+
+        img_data = convert_plotly_to_png(bar_fig, 900, 500)
+        if img_data:
+            story.append(Image(BytesIO(img_data), width=6.5 * inch, height=3.8 * inch))
+
+        story.append(Spacer(1, 0.3 * inch))
+
+        # Box Plot
+        box_fig = px.box(df_hmpi_copy, y="HMPI", title="HMPI Statistical Spread", points="outliers")
+        box_fig.update_layout(height=450, width=900)
+
+        img_data = convert_plotly_to_png(box_fig, 900, 450)
+        if img_data:
+            story.append(Image(BytesIO(img_data), width=6.5 * inch, height=3.5 * inch))
+
+        # ================= PER SAMPLE =================
+        for _, sample_row in df_hmpi_copy.iterrows():
+
+            story.append(PageBreak())
+
+            sample_id = sample_row.get("Sample_ID", "N/A")
+
+            story.append(Paragraph(f"Sample Analysis: {sample_id}", styles['Heading1']))
+            story.append(Spacer(1, 0.2 * inch))
+
+            story.append(Paragraph(
+                f"<b>HMPI:</b> {sample_row['HMPI']:.4f} | "
+                f"<b>Risk:</b> {sample_row.get('RiskCategory', 'N/A')}",
+                styles['Normal']
+            ))
+
+            story.append(Spacer(1, 0.3 * inch))
+
+            metal_data = []
+            metal_names = []
+
+            for metal, col in metal_cols.items():
+                if col in sample_row and pd.notna(sample_row[col]):
+                    metal_data.append(float(sample_row[col]))
+                    metal_names.append(metal)
+
+            if metal_data:
+                conc_df = pd.DataFrame({
+                    "Metal": metal_names,
+                    "Concentration (mg/L)": metal_data
+                })
+
+                # -------- BAR CHART --------
+                bar_fig = px.bar(
+                    conc_df,
+                    x="Metal",
+                    y="Concentration (mg/L)",
+                    title=f"Metal Concentrations - {sample_id}"
+                )
+
+                bar_fig.update_layout(height=450, width=900)
+
+                img_data = convert_plotly_to_png(bar_fig, 900, 450)
+                if img_data:
+                    story.append(Image(BytesIO(img_data), width=6.5 * inch, height=3.5 * inch))
+
+                story.append(Spacer(1, 0.3 * inch))
+
+                # -------- PIE (DONUT) CHART --------
+                pie_sample_fig = px.pie(
+                    conc_df,
+                    values='Concentration (mg/L)',
+                    names='Metal',
+                    title=f'Metal Composition - {sample_id}',
+                    hole=0.35
+                )
+
+                pie_sample_fig.update_traces(
+                    textposition='inside',
+                    textinfo='percent+label'
+                )
+
+                pie_sample_fig.update_layout(
+                    height=500,
+                    width=900,
+                    showlegend=True,
+                    title_font_size=18
+                )
+
+                pie_sample_img_data = convert_plotly_to_png(
+                    pie_sample_fig,
+                    width=900,
+                    height=500
+                )
+
+                if pie_sample_img_data:
+                    story.append(Image(BytesIO(pie_sample_img_data),
+                                       width=6.5 * inch,
+                                       height=3.8 * inch))
+
+        doc.build(story)
+
+    except Exception as e:
+        print("Error building long report:", e)
+        raise
+
+    buffer.seek(0)
+    return buffer
+def generate_short_report_pdf(df_hmpi: pd.DataFrame, file_id: str, file_name: str, metal_cols: dict) -> BytesIO:
+
+    buffer = io.BytesIO()
+
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        title=f"HMPI Short Report - {file_id}",
+        leftMargin=0.5 * inch,
+        rightMargin=0.5 * inch,
+        topMargin=0.5 * inch,
+        bottomMargin=0.5 * inch
+    )
+
+    styles = getSampleStyleSheet()
+    story = []
+
+    try:
+        df_hmpi_copy = df_hmpi.copy()
+
+        risk_bins = [0, 60, 100, np.inf]
+        risk_labels = ["Safe (≤60)", "Moderate (61–100)", "High (>100)"]
+
+        df_hmpi_copy["RiskCategory"] = pd.cut(
+            df_hmpi_copy["HMPI"],
+            bins=risk_bins,
+            labels=risk_labels
+        )
+
+        risk_counts = df_hmpi_copy["RiskCategory"].value_counts().reindex(risk_labels, fill_value=0)
+        total_samples = len(df_hmpi_copy)
+
+        # ================= PAGE 1 =================
+        story.append(Paragraph("HMPI Summary Report", styles['Title']))
+        story.append(Paragraph(f"{file_name}", styles['Normal']))
+        story.append(Paragraph(f"Generated on: {datetime.now().strftime('%Y-%m-%d')}", styles['Normal']))
+        story.append(Spacer(1, 0.15 * inch))
+
+        # ===== SUMMARY TABLE (UNCHANGED AS REQUESTED) =====
+        table_data = [['Sample ID', 'HMPI Value', 'Risk Category']]
+
+        for _, row in df_hmpi_copy.iterrows():
+            table_data.append([
+                str(row.get("Sample_ID", "N/A")),
+                f"{row['HMPI']:.4f}" if pd.notna(row["HMPI"]) else "N/A",
+                str(row.get("RiskCategory", "N/A"))
+            ])
+
+        summary_table = Table(table_data, colWidths=[1.2 * inch, 1.2 * inch, 2 * inch])
+        summary_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2E4053')),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 7),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 3),
+            ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+            ('GRID', (0, 0), (-1, -1), 0.3, colors.black),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1),
+             [colors.white, colors.HexColor('#F4F6F7')])
+        ]))
+
+        story.append(summary_table)
+        story.append(Spacer(1, 0.3 * inch))
+
+        # ================= GLOBAL HISTOGRAM =================
+        hmpi_valid = df_hmpi_copy["HMPI"].dropna()
+
+        if len(hmpi_valid) > 0:
+
+            mean_val = hmpi_valid.mean()
+
+            hist_fig = px.histogram(
+                hmpi_valid,
+                nbins=20,
+                title="HMPI Distribution Overview",
+                labels={'value': 'HMPI Value', 'count': 'Frequency'}
+            )
+
+            hist_fig.update_traces(marker_color="#4e73df")
+
+            hist_fig.add_vline(
+                x=mean_val,
+                line_dash="dash",
+                line_color="red",
+                annotation_text=f"Mean = {mean_val:.2f}"
+            )
+
+            hist_fig.update_layout(
+                height=500,
+                width=900,
+                title_font_size=18,
+                showlegend=False
+            )
+
+            img_data = convert_plotly_to_png(hist_fig, 900, 500)
+
+            if img_data:
+                story.append(Image(BytesIO(img_data), width=6.5 * inch, height=3.8 * inch))
+
+        story.append(Spacer(1, 0.3 * inch))
+
+        # ================= RISK DISTRIBUTION BAR =================
+        risk_df = pd.DataFrame({
+            "Risk Category": risk_counts.index,
+            "Count": risk_counts.values
+        })
+
+        bar_fig = px.bar(
+            risk_df,
+            x="Risk Category",
+            y="Count",
+            color="Risk Category",
+            title="Risk Category Distribution",
+            color_discrete_map={
+                "Safe (≤60)": "#2ecc71",
+                "Moderate (61–100)": "#f39c12",
+                "High (>100)": "#e74c3c"
+            }
+        )
+
+        bar_fig.update_layout(
+            height=500,
+            width=900,
+            title_font_size=18,
+            showlegend=True
+        )
+
+        img_data = convert_plotly_to_png(bar_fig, 900, 500)
+
+        if img_data:
+            story.append(Image(BytesIO(img_data), width=6.5 * inch, height=3.8 * inch))
+
+        # ================= PAGE 2: PROFESSIONAL CONCLUSION =================
+        story.append(PageBreak())
+
+        story.append(Paragraph("Analysis Conclusion", styles['Heading1']))
+        story.append(Spacer(1, 0.3 * inch))
+
+        safe_pct = (risk_counts["Safe (≤60)"] / total_samples * 100) if total_samples else 0
+        moderate_pct = (risk_counts["Moderate (61–100)"] / total_samples * 100) if total_samples else 0
+        high_pct = (risk_counts["High (>100)"] / total_samples * 100) if total_samples else 0
+
+        story.append(Paragraph(
+            f"""
+            <b>Overall Environmental Assessment:</b><br/><br/>
+            A total of <b>{total_samples}</b> samples were evaluated using the Heavy Metal Pollution Index methodology.
+            Approximately <b>{safe_pct:.1f}%</b> fall within safe regulatory limits,
+            <b>{moderate_pct:.1f}%</b> indicate moderate contamination levels,
+            and <b>{high_pct:.1f}%</b> exceed recommended safety thresholds.
+            """,
+            styles['Normal']
+        ))
+
+        story.append(Spacer(1, 0.4 * inch))
+
+        story.append(Paragraph(
+            """
+            <b>Interpretation:</b><br/><br/>
+            Elevated HMPI values suggest potential heavy metal accumulation in specific zones.
+            These areas may require immediate monitoring and further geochemical investigation
+            to prevent ecological degradation and human exposure risks.
+            """,
+            styles['Normal']
+        ))
+
+        story.append(Spacer(1, 0.4 * inch))
+
+        story.append(Paragraph(
+            """
+            <b>Recommendations:</b><br/><br/>
+            • Establish routine monitoring programs in moderate and high-risk zones.<br/>
+            • Conduct source identification and contaminant pathway analysis.<br/>
+            • Implement remediation strategies such as soil stabilization or phytoremediation.<br/>
+            • Strengthen regulatory compliance audits in industrial clusters.<br/>
+            • Promote community awareness regarding heavy metal exposure risks.
+            """,
+            styles['Normal']
+        ))
+
+        doc.build(story)
+
+    except Exception as e:
+        print("Error building short report:", e)
+        raise
+
+    buffer.seek(0)
+    return buffer
+
+
+def export_to_excel(df_hmpi: pd.DataFrame, file_name: str) -> BytesIO:
+    """
+    Export data to Excel with error checking and multiple sheets.
+    """
+    buffer = BytesIO()
+    
+    try:
+        # Make a copy to avoid modifying the original
+        df_export = df_hmpi.copy()
+        
+        # Create Excel writer
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            # Sheet 1: Main Data with HMPI
+            df_export.to_excel(writer, sheet_name='HMPI Data', index=False)
+            
+            # Sheet 2: Summary Statistics
+            summary_stats = {
+                'Metric': ['Total Samples', 'Mean HMPI', 'Median HMPI', 'Min HMPI', 'Max HMPI', 'Std Dev'],
+                'Value': [
+                    len(df_export),
+                    float(df_export['HMPI'].mean()),
+                    float(df_export['HMPI'].median()),
+                    float(df_export['HMPI'].min()),
+                    float(df_export['HMPI'].max()),
+                    float(df_export['HMPI'].std())
+                ]
+            }
+            pd.DataFrame(summary_stats).to_excel(writer, sheet_name='Statistics', index=False)
+            
+            # Sheet 3: Risk Categories
+            risk_bins = [0, 60, 100, np.inf]
+            risk_labels = ["Safe (≤60)", "Moderate (61–100)", "High (>100)"]
+            df_export["RiskCategory"] = pd.cut(df_export["HMPI"], bins=risk_bins, labels=risk_labels, right=True)
+            risk_count = df_export["RiskCategory"].value_counts().reset_index()
+            risk_count.columns = ['Risk Category', 'Count']
+            risk_count['Percentage'] = (risk_count['Count'] / len(df_export) * 100).round(2)
+            risk_count.to_excel(writer, sheet_name='Risk Summary', index=False)
+            
+            # Sheet 4: Metadata
+            metadata = {
+                'Field': ['File Name', 'Generated At', 'Total Samples', 'Analysis Date'],
+                'Value': [str(file_name), str(datetime.now().strftime('%Y-%m-%d %H:%M:%S')), int(len(df_export)), str(datetime.now().date())]
+            }
+            pd.DataFrame(metadata).to_excel(writer, sheet_name='Metadata', index=False)
+        
+        buffer.seek(0)
+        return buffer
+    
+    except Exception as e:
+        print(f"Error creating Excel file: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+
+
+def generate_leaflet_map_html(df_hmpi: pd.DataFrame, file_id: str) -> str:
+    import json
+
+    features = []
+
+    for _, row in df_hmpi.iterrows():
+        lat = row.get("Latitude")
+        lon = row.get("Longitude")
+        hmpi = row.get("HMPI")
+        sample_id = row.get("Sample_ID", "Unknown")
+
+        if pd.isna(lat) or pd.isna(lon):
+            continue
+
+        if pd.isna(hmpi):
+            risk = "Unknown"
+            color = "#9e9e9e"
+        elif hmpi <= 60:
+            risk = "Safe"
+            color = "#2ecc71"
+        elif hmpi <= 100:
+            risk = "Moderate"
+            color = "#f39c12"
+        else:
+            risk = "High"
+            color = "#e74c3c"
+
+        metals = {}
+        for col in df_hmpi.columns:
+            if col not in ["Sample_ID", "Latitude", "Longitude", "HMPI"] and \
+               not str(col).endswith(("_Qi", "_Wi", "_SIi")):
+                val = row.get(col)
+                if pd.notna(val):
+                    try:
+                        metals[col] = round(float(val), 4)
+                    except:
+                        pass
+
+        features.append({
+            "lat": float(lat),
+            "lon": float(lon),
+            "sample_id": sample_id,
+            "hmpi": round(float(hmpi), 4) if pd.notna(hmpi) else 0,
+            "risk": risk,
+            "color": color,
+            "metals": metals
+        })
+
+    data_json = json.dumps(features)
+
+    return f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>HMPI Interactive Map - {file_id}</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+<style>
+html, body {{
+    height: 100%;
+    margin: 0;
+    font-family: 'Segoe UI', sans-serif;
+}}
+
+#map {{
+    height: 100%;
+}}
+
+.left-stack {{
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    z-index: 1000;
+}}
+
+.panel {{
+    background: #2c3e50;
+    color: white;
+    padding: 16px 20px;
+    border-radius: 14px;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.35);
+    font-size: 14px;
+    min-width: 260px;
+}}
+
+.legend {{
+          background: #34495e;
+    color: white;
+    padding: 18px 20px;
+    border-radius: 14px;
+    box-shadow: 0 8px 25px rgba(0,0,0,0.35);
+    font-size: 14px;
+    min-width: 260px;
+}}
+
+.legend-title {{
+    font-weight: 600;
+    font-size: 15px;
+    margin-bottom: 12px;
+}}
+.legend-item {{
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+    font-weight: 500;
+}}
+
+.legend-dot {{
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    margin-right: 10px;
+    display: inline-block;
+}}
+
+.legend-dot.safe {{
+    background: #2ecc71;
+}}
+
+.legend-dot.moderate {{
+    background: #f39c12;
+}}
+
+.legend-dot.high {{
+    background: #e74c3c;
+}}
+</style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="left-stack">
+
+    <div class="panel">
+        <b>📍 HMPI Levels</b><br>
+        File ID: {file_id}<br>
+        Total Samples: <span id="count"></span>
+    </div>
+
+    <div class="legend">
+        <div class="legend-title">
+            📍 HMPI Standards
+        </div>
+
+        <div class="legend-item">
+            <span class="legend-dot safe"></span>
+            Safe (≤60)
+        </div>
+
+        <div class="legend-item">
+            <span class="legend-dot moderate"></span>
+            Moderate (61–100)
+        </div>
+
+        <div class="legend-item">
+            <span class="legend-dot high"></span>
+            High (>100)
+        </div>
+    </div>
+
+</div>
+
+<script>
+
+const data = {data_json};
+
+const map = L.map('map').setView([28.45, 77.02], 12);
+
+// Professional Light Basemap
+L.tileLayer('https://{{s}}.basemaps.cartocdn.com/light_all/{{z}}/{{x}}/{{y}}{{r}}.png', {{
+    attribution: '&copy; OpenStreetMap & Carto',
+    maxZoom: 19
+}}).addTo(map);
+
+let bounds = [];
+
+data.forEach(sample => {{
+
+    const marker = L.marker([sample.lat, sample.lon], {{
+        icon: L.divIcon({{
+            className: '',
+            html: `<div style="
+                width: 14px;
+                height: 14px;
+                background: ${{sample.color}};
+                border-radius: 50%;
+                border: 2px solid white;
+                box-shadow: 0 0 6px rgba(0,0,0,0.4);
+            "></div>`,
+            iconSize: [14,14]
+        }})
+    }}).addTo(map);
+
+    let metalHtml = "";
+    if(sample.metals && Object.keys(sample.metals).length > 0) {{
+        metalHtml += "<hr>";
+        Object.entries(sample.metals).forEach(([k,v]) => {{
+            metalHtml += "<b>" + k + ":</b> " + v + " mg/L<br>";
+        }});
+    }}
+
+    marker.bindPopup(
+        "<b>" + sample.sample_id + "</b><br>" +
+        "HMPI: <b>" + sample.hmpi + "</b><br>" +
+        "Risk: <b>" + sample.risk + "</b>" +
+        metalHtml
+    );
+
+    bounds.push([sample.lat, sample.lon]);
+
+}});
+
+if(bounds.length > 0) {{
+    map.fitBounds(bounds, {{ padding: [40,40] }});
+}}
+
+document.getElementById("count").innerText = data.length;
+
+</script>
+
+</body>
+</html>
+"""
+
+@app.route("/download_map_html/<file_id>", methods=["GET"])
+def download_map_html(file_id):
+    """
+    Download an interactive HTML map for HMPI data - fully self-contained, no external dependencies.
+    """
+    try:
+        # Fetch the sample document
+        doc = samples_collection.find_one({'_id': file_id})
+        if not doc:
+            return jsonify({'error': 'File not found'}), 404
+
+        geojson_data = doc.get('GeoJSON', [])
+        if not geojson_data:
+            return jsonify({'error': 'No data found'}), 400
+
+        # Convert GeoJSON to DataFrame
+        df = pd.DataFrame(geojson_data)
+
+        # Expand all_metal_conc into separate columns
+        if "all_metal_conc" in df.columns:
+            metals_expanded = pd.json_normalize(df["all_metal_conc"]).add_prefix("")
+            df = pd.concat([df.drop(columns=["all_metal_conc"]), metals_expanded], axis=1)
+        if "Latitude" not in df.columns or "Longitude" not in df.columns:
+            if "geometry" in df.columns:
+                df["Longitude"] = df["geometry"].apply(
+                    lambda g: g["coordinates"][0] if isinstance(g, dict) else None
+                )
+                df["Latitude"] = df["geometry"].apply(
+                    lambda g: g["coordinates"][1] if isinstance(g, dict) else None)
+        # Detect metals present
+        metal_cols = {m: m for m in df.columns if m in STANDARD_LIMITS}
+
+        if not metal_cols:
+            return jsonify({'error': 'No heavy metal data found'}), 400
+
+        # Compute HMPI
+        df_hmpi = compute_hmpi_vectorized(df, metal_cols)
+
+        # Generate HTML map
+        html_content = generate_leaflet_map_html(df_hmpi, file_id)
+
+        return Response(
+            html_content,
+            mimetype="text/html",
+            headers={"Content-Disposition": f"attachment; filename=HMPI_Interactive_Map_{file_id}.html"}
+        )
+
+    except Exception as e:
+        print(f"Error in download_map_html: {e}")
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route("/hmpi-charts-csv", methods=["POST"])
 def hmpi_charts_csv():

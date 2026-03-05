@@ -8,7 +8,7 @@ const AnalysisOptions = () => {
   const navigate = useNavigate();
   const location = useLocation();
 
-  const tabs = ["samples", "map", "export", "predictions"] as const; // lowercase for routes
+  const tabs = ["samples", "map", "export", "predictions"] as const; 
   const [activeTab, setActiveTab] = useState<typeof tabs[number]>("samples");
 
   // Set active tab based on URL
